@@ -66,3 +66,82 @@ Run `sudo poweroff` from the Rocky SSH session; the connection closes. In Virtua
 **Observed result:** the named snapshot appeared in the list. **Current State (changed)** does not mean it failed. To roll back later, power off the VM, select the saved snapshot and choose **Restore**; changes made after the checkpoint can be lost. A snapshot is a checkpoint, not an independent backup.
 
 **Completion:** installation, first boot, hostname, normal user, host SSH and snapshot verified.
+
+
+---
+
+## Recent update — Host-only networking and recovery 
+
+### Connect the two VMs — in VirtualBox on my Mac
+
+I added a shared host-only network so Ubuntu and Rocky could reach each other. **Adapter 1 stayed as NAT** for internet access and the original SSH forwarding rules.
+
+1. Shut down both VMs using `sudo poweroff` inside each VM.
+2. Open **VirtualBox Manager → Tools → Network → Host-only Networks**. An existing network called **HostNetwork** was available, with subnet mask `255.255.255.0`.
+3. For each powered-off VM, open **Settings → Network → Adapter 2**. Tick **Enable Network Adapter**, choose **Host-only Network**, select **HostNetwork** and keep **Cable Connected** ticked. Click **OK**.
+4. Start both VMs, log in and run `ip -br address` inside each one. This shows a brief list of interfaces and their IP addresses.
+
+| VM | NAT interface / IP | Host-only interface / IP observed |
+|---|---|---|
+| Ubuntu | `enp0s3` / `10.0.2.15` | `enp0s8` / `192.168.56.3/24` |
+| Rocky | `enp0s3` / `10.0.2.15` | `enp0s8` / `192.168.56.2/24` |
+
+Both VMs can have the same NAT IP because their default NAT connections are separate. For communication between them, I used their different **host-only IP addresses**. These addresses were assigned automatically and may change; check `ip -br address` after a reboot or restore. Do not include `/24` when typing an address in ping or SSH commands.
+
+### Check Rocky’s host-only adapter — inside Rocky
+
+```bash
+ip -br address
+```
+
+**Observed result:** `enp0s8` was **UP** and had automatically received `192.168.56.2/24`. No manual address assignment or Netplan YAML file was needed on Rocky. Ubuntu needed a separate Netplan configuration because its new interface initially showed **DOWN**; that fix is recorded in the Ubuntu runbook.
+
+### Verify ping between the VMs and SSH from my Mac
+
+With both VMs running, I completed these tests:
+
+| Where I ran it | Command | Result |
+|---|---|---|
+| Inside Ubuntu | `ping -c 4 192.168.56.2` | 4 packets sent, 4 received; 0% packet loss |
+| Inside Rocky | `ping -c 6 192.168.56.3` | 6 packets sent, 6 received; 0% packet loss |
+| Mac Terminal | `ssh amarachi@192.168.56.3` | Successfully logged into Ubuntu |
+| Mac Terminal, after typing `exit` | `ssh amarachi@192.168.56.2` | Successfully logged into Rocky |
+
+`-c` sets how many ping requests to send before stopping. Ping uses **ICMP** to test reachability. SSH uses **TCP port 22** by default, so these direct connections do not need `-p 2222` or `-p 2223`. The original NAT forwarding rules remain an alternative way to connect. I used each VM’s password for SSH and kept screenshots as evidence.
+
+### Save snapshots named clean — in VirtualBox
+
+I shut down each VM with `sudo poweroff`. In VirtualBox, I selected each powered-off VM → **Snapshots → Take**, named the new snapshot exactly **clean**, and saved it. I retained the earlier installation snapshots.
+
+**Observed result:** Both snapshot lists showed **clean**, capturing the working host-only network setup after ping and direct SSH verification. This is the checkpoint used for the recovery exercise below.
+
+### Break and fix — Rocky SSH failure and snapshot recovery
+
+1. Confirm working SSH from **Mac Terminal** using `ssh amarachi@192.168.56.2`, then type `exit`.
+2. Inside **Rocky**, deliberately stop SSH and disable automatic startup:
+
+```bash
+sudo systemctl disable --now sshd
+```
+
+Rocky’s service is called `sshd`, rather than Ubuntu’s `ssh`.
+
+3. Keep the VM running. From **Mac Terminal**, test a new connection:
+
+```bash
+ssh -o ConnectTimeout=5 amarachi@192.168.56.2
+```
+
+`-o` sets an SSH option; `ConnectTimeout=5` limits connection setup to five seconds. It can fail sooner if refused, and it does not disconnect a successful session after five seconds.
+
+**Failure result:** SSH was unavailable after disabling it.  Stopping SSH does not itself disable the network; ping is a separate reachability test.
+
+4. In **Rocky’s VirtualBox window**, run `sudo poweroff`.
+5. Select **rocky_lab → Snapshots → clean → Restore**. Untick **Create a snapshot of the current machine state** if offered for this deliberately broken state, confirm, then start the VM again. Restoring discards changes made after **clean**.
+6. Retry the SSH command from **Mac Terminal**, checking the VM’s current host-only IP if necessary.
+
+**Recovery result:** I successfully logged in again after restoring **clean**. The snapshot restored the working SSH configuration without reinstalling the operating system or manually enabling SSH again.
+
+**Evidence:** Keep the successful login before the break, failed connection, clean snapshot and successful login after recovery.
+
+**Update completion:** shared host-only networking, bidirectional ping, direct SSH, clean snapshot and snapshot-based SSH recovery completed.
